@@ -21,28 +21,29 @@ import com.amazonaws.regions.Region;
 import com.amazonaws.regions.Regions;
 import com.amazonaws.services.s3.AmazonS3Client;
 
-public class Uploader implements Runnable {
+public class Uploader implements UploaderInterface, Runnable {
 
 	private static final String SYNTAX = "s3upload -source <SOURCE> -bucket <BUCKET> -credential <CREDENTIAL>";
 	public static final int DEFAULT_MAX_WORKER_THREADS = 10;
 
-	private static void launch(CommandLine cmd) {
+	private static void launch(CommandLine cmd) throws InterruptedException {
 		String sourcePath = cmd.getOptionValue("source");
 		String bucket = cmd.getOptionValue("bucket");
 		String credentialPath = cmd.getOptionValue("credential");
 		String prefix = cmd.getOptionValue("prefix", "");
-		Region region = Region.getRegion(Regions.fromName(cmd.getOptionValue("region")));
+		Region region = Region.getRegion(Regions.fromName(cmd.getOptionValue("region", "")));
 		boolean recurse = cmd.hasOption("recurse");
 		boolean pretend = cmd.hasOption("pretend");
 		boolean delete = cmd.hasOption("delete");
 		boolean create = cmd.hasOption("create");
 		boolean purge = cmd.hasOption("purge");
 		int maxThreads = Integer.valueOf(cmd.getOptionValue("threads", "10"));
+		S3Object s3Object = new S3Object(prefix, sourcePath);
 
 		Uploader uploader = new Uploader();
-		uploader.setS3Object(new S3Object(prefix, sourcePath));
 		uploader.setBucketName(bucket);
 		uploader.setCredentialPath(credentialPath);
+		uploader.setDestination(prefix);
 		uploader.setRegion(region);
 		uploader.setRecurse(recurse);
 		uploader.setPretend(pretend);
@@ -51,20 +52,12 @@ public class Uploader implements Runnable {
 		uploader.setCreate(create);
 		uploader.setMaximumThreadCount(maxThreads);
 
-		// Connect to AWS
-		uploader.setClient(uploader.connect());
+		// Queue the file
+		uploader.queue(s3Object);
 
-		try {
-			// Prepare for file transfer (create, purge)
-			uploader.prepare();
-			// Upload
-			uploader.upload();
-		} catch (InterruptedException e) {
-			e.printStackTrace();
-		}
-
+		// Upload
+		uploader.upload();
 	}
-	
 
 	public static void main(String[] args) throws InterruptedException {
 
@@ -181,12 +174,8 @@ public class Uploader implements Runnable {
 	private boolean pretend;
 	private Region region;
 	private String credentialPath;
-	private S3Object s3Object;
-
 	private boolean purge;
-
 	private boolean create;
-
 	private boolean recurse;
 
 	public Uploader() {
@@ -212,15 +201,12 @@ public class Uploader implements Runnable {
 		return client;
 	}
 
-	public boolean doRecurse() {
-		return recurse;
-	}
-
 	private synchronized void dropLiveThreadCount() {
 		liveThreadCount--;
 		notifyAll();
 	}
 
+	@Override
 	public String getBucketName() {
 		return bucketName;
 	}
@@ -229,18 +215,22 @@ public class Uploader implements Runnable {
 		return client;
 	}
 
+	@Override
 	public String getCredentialPath() {
 		return credentialPath;
 	}
 
+	@Override
 	public String getDestination() {
 		return destination;
 	}
 
-	private int getLiveThreadCount() {
+	@Override
+	public int getLiveThreadCount() {
 		return liveThreadCount;
 	}
 
+	@Override
 	public int getMaximumThreadCount() {
 		return maximumThreadCount;
 	}
@@ -256,36 +246,49 @@ public class Uploader implements Runnable {
 		return s3Object;
 	}
 
+	@Override
 	public Region getRegion() {
 		return region;
 	}
 
-	public S3Object getS3Object() {
-		return s3Object;
-	}
-
+	@Override
 	public boolean isCreate() {
 		return create;
 	}
 
+	@Override
 	public boolean isDeleteAfterUpload() {
 		return deleteAfterUpload;
 	}
 
+	@Override
 	public boolean isPretend() {
 		return pretend;
 	}
 
+	@Override
 	public boolean isPurge() {
 		return purge;
 	}
 
-	private synchronized boolean isRunning() {
+	public boolean isRecurse() {
+		return recurse;
+	}
+
+	@Override
+	public synchronized boolean isRunning() {
 		return running;
 	}
 
-	public void prepare() throws InterruptedException {
+	@Override
+	public S3Object peek() {
+		return queue.peek();
+	}
+
+	private void prepare() {
 		System.out.println("Preparing for uploading");
+		// Connect AWS
+		setClient(connect());
 
 		// TODO check if bucket exists and is writable
 
@@ -304,10 +307,6 @@ public class Uploader implements Runnable {
 				// TODO write method to purge bucket
 			}
 		}
-
-		// Queue
-		queue(getS3Object());
-
 	}
 
 	// Walk through a directory and add all files to the queue
@@ -347,6 +346,7 @@ public class Uploader implements Runnable {
 		}
 	}
 
+	@Override
 	public void queue(S3Object s3Object) throws InterruptedException {
 		System.out.println(s3Object.toString() + " added to queue");
 		queue.put(s3Object);
@@ -404,7 +404,7 @@ public class Uploader implements Runnable {
 						e.printStackTrace();
 					}
 
-				} else if (file.isDirectory() && doRecurse()) {
+				} else if (file.isDirectory() && isRecurse()) {
 					processDirectories(s3Object);
 				} else {
 					System.out.println("Skipping " + file.getCanonicalPath());
@@ -418,6 +418,7 @@ public class Uploader implements Runnable {
 		dropLiveThreadCount();
 	}
 
+	@Override
 	public void setBucketName(String bucketName) {
 		if (!isRunning()) {
 			synchronized (this) {
@@ -438,6 +439,7 @@ public class Uploader implements Runnable {
 		}
 	}
 
+	@Override
 	public void setCreate(boolean create) {
 		if (!isRunning() && getLiveThreadCount() < 1) {
 			synchronized (this) {
@@ -448,6 +450,7 @@ public class Uploader implements Runnable {
 		}
 	}
 
+	@Override
 	public void setCredentialPath(String credentialPath) {
 		if (!isRunning() && getLiveThreadCount() < 1 && client == null) {
 			synchronized (this) {
@@ -459,6 +462,7 @@ public class Uploader implements Runnable {
 		}
 	}
 
+	@Override
 	public void setDeleteAfterUpload(boolean deleteAfterUpload) {
 		if (!isRunning() && getLiveThreadCount() < 1) {
 			synchronized (this) {
@@ -470,6 +474,7 @@ public class Uploader implements Runnable {
 		}
 	}
 
+	@Override
 	public void setDestination(String destination) {
 		if (!isRunning()) {
 			synchronized (this) {
@@ -480,6 +485,7 @@ public class Uploader implements Runnable {
 
 	}
 
+	@Override
 	public void setMaximumThreadCount(int maximumThreadCount) {
 		if (!isRunning() && getLiveThreadCount() < 1) {
 			synchronized (this) {
@@ -491,6 +497,7 @@ public class Uploader implements Runnable {
 
 	}
 
+	@Override
 	public void setPretend(boolean pretend) {
 		if (!isRunning() && getLiveThreadCount() < 1) {
 			synchronized (this) {
@@ -502,6 +509,7 @@ public class Uploader implements Runnable {
 		}
 	}
 
+	@Override
 	public void setPurge(boolean purge) {
 		if (!isRunning() && getLiveThreadCount() < 1) {
 			synchronized (this) {
@@ -513,6 +521,7 @@ public class Uploader implements Runnable {
 
 	}
 
+	@Override
 	public void setRecurse(boolean recurse) throws IllegalStateException {
 		if (!isRunning()) {
 			synchronized (this) {
@@ -523,6 +532,7 @@ public class Uploader implements Runnable {
 
 	}
 
+	@Override
 	public void setRegion(Region region) {
 		if (!isRunning() && getLiveThreadCount() < 1 && client == null) {
 			synchronized (this) {
@@ -544,23 +554,24 @@ public class Uploader implements Runnable {
 			throw new IllegalStateException("Cannot change value of running while uploading");
 	}
 
-	public void setS3Object(S3Object s3Object) {
-		if (!isRunning() && getLiveThreadCount() < 1) {
-			synchronized (this) {
-				this.s3Object = s3Object;
-			}
-		} else {
-			throw new IllegalStateException("Cannot set s3Object while uploading");
-		}
-
+	@Override
+	public void upload() {
+		upload(true);
 	}
 
-	public void upload() {
-		setRunning(true);
+	private void upload(boolean firstPass) {
+		if (firstPass) {
+			// Prep environment (connect to AWS, purge, create...)
+			prepare();
 
+			setRunning(true);
+		}
+
+		// Start threads
 		for (int i = 0; i < getMaximumThreadCount(); i++)
 			sessionThreadPool.submit(this);
 
+		// Monitor threads
 		int liveThreadCount;
 		while ((liveThreadCount = getLiveThreadCount()) > 0) {
 			System.out.println("Active Worker Threads:" + liveThreadCount);
@@ -572,13 +583,18 @@ public class Uploader implements Runnable {
 			}
 		}
 
+		// Call upload again (this is necessary when directories are found and
+		// recursed)
 		if (queue.size() > 0) {
-			upload();
+			upload(false);
 		}
 
-		sessionThreadPool.shutdown();
+		if (firstPass) {
+			// Shutdown the thread pool
+			sessionThreadPool.shutdown();
 
-		System.out.println("Finished");
-		setRunning(false);
+			System.out.println("Finished");
+			setRunning(false);
+		}
 	}
 }
