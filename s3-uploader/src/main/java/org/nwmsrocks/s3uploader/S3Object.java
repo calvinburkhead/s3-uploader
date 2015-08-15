@@ -1,4 +1,4 @@
-package com.nwmsrocks.s3uploader;
+package org.nwmsrocks.s3uploader;
 
 import java.io.Serializable;
 
